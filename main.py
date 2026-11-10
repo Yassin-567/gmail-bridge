@@ -78,6 +78,9 @@ def start_google_auth():
     authorization_url, _ = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
     response = RedirectResponse(authorization_url)
     response.set_cookie("gmail_oauth_state", state, httponly=True, secure=settings.google_redirect_uri.startswith("https://"), samesite="lax", max_age=600)
+    # google-auth-oauthlib creates a PKCE verifier per Flow instance. Persist it
+    # across the redirect so the callback's new Flow can complete the token exchange.
+    response.set_cookie("gmail_oauth_verifier", flow.code_verifier, httponly=True, secure=settings.google_redirect_uri.startswith("https://"), samesite="lax", max_age=600)
     return response
 
 
@@ -87,7 +90,11 @@ def google_callback(request: Request, db: Session = Depends(get_db)):
     cookie_state = request.cookies.get("gmail_oauth_state", "")
     if not state or not cookie_state or not secrets.compare_digest(state, cookie_state):
         raise HTTPException(status_code=400, detail="OAuth state validation failed. Start again at /auth/google.")
+    verifier = request.cookies.get("gmail_oauth_verifier", "")
+    if not verifier:
+        raise HTTPException(status_code=400, detail="OAuth PKCE verifier cookie is missing. Start again at /auth/google.")
     flow = google_flow(state=state)
+    flow.code_verifier = verifier
     try:
         flow.fetch_token(authorization_response=str(request.url))
         save_credentials(db, flow.credentials)
@@ -95,6 +102,7 @@ def google_callback(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=f"Google authorization failed: {exc}") from exc
     response = RedirectResponse(url="/health")
     response.delete_cookie("gmail_oauth_state")
+    response.delete_cookie("gmail_oauth_verifier")
     response.headers["X-Gmail-Connected"] = "true"
     return response
 
