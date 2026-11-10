@@ -41,4 +41,52 @@ class FakeRequest:
         self.calls += 1
         if self.errors:
             raise self.errors.pop(0)
-        return s¶»§q«^
+        return self.result
+
+
+class FakeService:
+    def __init__(self, request):
+        self.request = request
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def send(self, **kwargs):
+        return self.request
+
+
+def test_send_history_and_duplicate_protection(db, monkeypatch):
+    request = FakeRequest()
+    monkeypatch.setattr(service_module, "gmail_service", lambda _db: FakeService(request))
+    first = service_module.send_message(db, "person@example.com", "Hello", "Body", idempotency_key="send-001")
+    second = service_module.send_message(db, "person@example.com", "Hello", "Body", idempotency_key="send-001")
+    assert first["status"] == "sent"
+    assert second["duplicate"] is True
+    assert request.calls == 1
+    history = db.query(EmailSend).one()
+    assert history.status == "sent"
+    assert history.message_id == "gmail-message-1"
+    assert not hasattr(history, "body")
+
+
+def test_retry_after_rate_limit(db, monkeypatch):
+    rate_limited = HttpError(httplib2.Response({"status": "429"}), b"rate limit")
+    request = FakeRequest(errors=[rate_limited])
+    monkeypatch.setattr(service_module, "gmail_service", lambda _db: FakeService(request))
+    monkeypatch.setattr(service_module.time, "sleep", lambda _seconds: None)
+    result = service_module.send_message(db, "person@example.com", "Hello", "Body", idempotency_key="send-002")
+    assert result["status"] == "sent"
+    assert result["attempts"] == 2
+    assert request.calls == 2
+
+
+def test_reusing_key_for_different_content_is_rejected(db, monkeypatch):
+    request = FakeRequest()
+    monkeypatch.setattr(service_module, "gmail_service", lambda _db: FakeService(request))
+    service_module.send_message(db, "person@example.com", "Hello", "Body", idempotency_key="send-003")
+    with pytest.raises(ValueError, match="different email"):
+        service_module.send_message(db, "person@example.com", "Changed", "Body", idempotency_key="send-003")
+    assert request.calls == 1
