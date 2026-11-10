@@ -34,10 +34,10 @@ def upload_attachment(filename: str, content_base64: str, mime_type: str | None 
 
 
 @mcp.tool()
-def send_gmail(to: str, subject: str, body: str, attachment_ids: list[str] | None = None, cc: str | None = None, bcc: str | None = None) -> dict:
+def send_gmail(to: str, subject: str, body: str, attachment_ids: list[str] | None = None, cc: str | None = None, bcc: str | None = None, idempotency_key: str | None = None) -> dict:
     """Send an email from the connected Gmail account. Only call after the user has explicitly approved the recipient, subject, body, and attachments."""
     with SessionLocal() as db:
         try:
-            return send_message(db, to, subject, body, attachment_ids, cc, bcc)
+            return send_message(db, to, subject, body, attachment_ids, cc, bcc, idempotency_key=idempotency_key)
         except (RuntimeError, ValueError) as exc:
             return {"error": str(exc)}

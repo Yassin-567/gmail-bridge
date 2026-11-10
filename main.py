@@ -9,9 +9,11 @@ from google_auth_oauthlib.flow import Flow
 from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import Base, SessionLocal, engine
-from app.gmail_service import SCOPES, save_credentials, store_attachment
+from app.gmail_service import SCOPES, GmailAuthError, get_credentials, save_credentials, send_message, store_attachment
 from app.mcp_server import mcp
 from app.security import require_bridge_key
+from app.models import EmailSend, GoogleCredential
+from sqlalchemy import text as sql_text
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -20,7 +22,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-Bridge-Key"])
+app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "X-Bridge-Key", "Idempotency-Key"])
 
 
 @app.middleware("http")
@@ -66,7 +68,27 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    # Public liveness probe: deliberately reveals no database or account details.
+    return {"ok": True, "service": "gmail-bridge"}
+
+
+@app.get("/health/ready", dependencies=[Depends(require_bridge_key)])
+def readiness(db: Session = Depends(get_db)):
+    try:
+        db.execute(sql_text("SELECT 1"))
+        connected = db.get(GoogleCredential, 1) is not None
+        credentials_valid = False
+        auth_error = None
+        if connected:
+            try:
+                credentials = get_credentials(db)
+                credentials_valid = bool(credentials and credentials.valid)
+            except GmailAuthError as exc:
+                auth_error = str(exc)
+        return {"ok": True, "database": "ok", "gmail_connected": connected,
+                "gmail_credentials_valid": credentials_valid, "gmail_error": auth_error}
+    except Exception:
+        raise HTTPException(status_code=503, detail="Readiness check failed. Check database connectivity and application logs.")
 
 
 @app.get("/auth/google")
@@ -109,8 +131,17 @@ def google_callback(request: Request, db: Session = Depends(get_db)):
 
 @app.get("/gmail/status", dependencies=[Depends(require_bridge_key)])
 def gmail_status(db: Session = Depends(get_db)):
-    from app.models import GoogleCredential
-    return {"connected": db.get(GoogleCredential, 1) is not None, "scope": "gmail.send"}
+    connected = db.get(GoogleCredential, 1) is not None
+    valid = False
+    error = None
+    if connected:
+        try:
+            credentials = get_credentials(db)
+            valid = bool(credentials and credentials.valid)
+        except GmailAuthError as exc:
+            error = str(exc)
+    return {"connected": connected, "credentials_valid": valid,
+            "scope": "gmail.send" if connected else None, "error": error}
 
 
 @app.post("/attachments", dependencies=[Depends(require_bridge_key)])
@@ -124,16 +155,37 @@ async def upload_attachment(file: UploadFile = File(...), db: Session = Depends(
 
 
 @app.post("/gmail/send", dependencies=[Depends(require_bridge_key)])
-def gmail_send(payload: dict, db: Session = Depends(get_db)):
+def gmail_send(payload: dict, request: Request, db: Session = Depends(get_db)):
     required = ["to", "subject", "body"]
-    missing = [field for field in required if not payload.get(field)]
+    missing = [field for field in required if payload.get(field) is None or payload.get(field) == ""]
     if missing:
-        raise HTTPException(status_code=422, detail=f"Missing fields: {', '.join(missing)}")
-    from app.gmail_service import send_message
+        raise HTTPException(status_code=422, detail={"code": "missing_fields", "message": f"Missing fields: {', '.join(missing)}"})
+    idempotency_key = request.headers.get("Idempotency-Key") or payload.get("idempotency_key")
     try:
-        return send_message(db, payload["to"], payload["subject"], payload["body"], payload.get("attachment_ids"), payload.get("cc"), payload.get("bcc"))
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return send_message(db, payload["to"], payload["subject"], payload["body"],
+                            payload.get("attachment_ids"), payload.get("cc"), payload.get("bcc"),
+                            idempotency_key=idempotency_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "invalid_request", "message": str(exc)}) from exc
+    except RuntimeError as exc:
+        message = str(exc)
+        code = "send_outcome_unknown" if "unknown outcome" in message or "connection failed" in message else "send_conflict" if "already" in message else "gmail_send_failed"
+        status = 409 if code in {"send_outcome_unknown", "send_conflict"} else 503
+        raise HTTPException(status_code=status, detail={"code": code, "message": message}) from exc
+
+
+@app.get("/gmail/history", dependencies=[Depends(require_bridge_key)])
+def gmail_history(limit: int = 25, offset: int = 0, db: Session = Depends(get_db)):
+    if limit < 1 or limit > 100 or offset < 0:
+        raise HTTPException(status_code=422, detail={"code": "invalid_pagination", "message": "limit must be 1-100 and offset must be 0 or greater."})
+    rows = db.query(EmailSend).order_by(EmailSend.created_at.desc()).offset(offset).limit(limit).all()
+    return {"items": [{"id": row.id, "status": row.status, "to": row.recipient,
+                       "cc": row.cc, "bcc": row.bcc, "subject": row.subject,
+                       "message_id": row.message_id, "thread_id": row.thread_id,
+                       "attempts": row.attempts, "error_code": row.error_code,
+                       "error": row.error_message, "created_at": row.created_at.isoformat() if row.created_at else None,
+                       "updated_at": row.updated_at.isoformat() if row.updated_at else None}
+                      for row in rows], "limit": limit, "offset": offset}
 
 
 # FastMCP's streamable_http_app() in the pinned SDK wrapper takes no arguments.
