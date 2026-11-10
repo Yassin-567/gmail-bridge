@@ -29,4 +29,14 @@ class EmailSend(Base):
     status: Mapped[str] = mapped_column(String(20), index=True)
     recipient: Mapped[str] = mapped_column(Text)
     cc: Mapped[str | None] = mapped_column(Text, nullable=True)
-    bcc: Mappe¶»§q«^t((€€€}}Ñ…‰±•}…ÉÍ}|€ô€¡%¹‘•à ‰¥á}•µ…¥±}Í•¹‘Í}É•…Ñ•‘}…Ğˆ°€‰É•…Ñ•‘}…Ğˆ¤°¤
+    bcc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    subject: Mapped[str] = mapped_column(Text)
+    message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (Index("ix_email_sends_created_at", "created_at"),)
