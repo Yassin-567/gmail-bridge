@@ -126,4 +126,6 @@ def gmail_send(payload: dict, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-app.mount("/mcp", mcp.streamable_http_app(streamable_http_path="/", host="0.0.0.0"))
+# FastMCP's streamable_http_app() in the pinned SDK wrapper takes no arguments.
+# Its built-in endpoint is /mcp, so mount it at the root to expose /mcp directly.
+app.mount("/", mcp.streamable_http_app())
