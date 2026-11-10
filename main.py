@@ -73,7 +73,9 @@ def health():
 def start_google_auth():
     state = secrets.token_urlsafe(32)
     flow = google_flow(state=state)
-    authorization_url, _ = flow.authorization_url(access_type="offline", include_granted_scopes=True, prompt="consent")
+    # Pass lowercase text: the OAuth URL must contain include_granted_scopes=true,
+    # not Python's capitalized boolean representation "True".
+    authorization_url, _ = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
     response = RedirectResponse(authorization_url)
     response.set_cookie("gmail_oauth_state", state, httponly=True, secure=settings.google_redirect_uri.startswith("https://"), samesite="lax", max_age=600)
     return response
